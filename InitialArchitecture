@@ -1,0 +1,825 @@
+"""
+3D Spatial Data Analysis System
+Solo Hackathon Build - 30 Hours
+3 Agent Team: Pattern Analysis + Insight Extraction + Report Generation
+
+Use Cases:
+- Urban planning (building density, infrastructure gaps)
+- Environmental monitoring (deforestation, terrain changes)
+- Construction site analysis (progress tracking, safety violations)
+- Autonomous vehicle mapping (obstacle detection, route planning)
+- Agriculture (crop health, irrigation optimization)
+"""
+
+# ============================================
+# requirements.txt - MINIMAL FOR SOLO BUILD
+# ============================================
+"""
+# Core (2 hours setup)
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+python-dotenv==1.0.0
+
+# Google ADK (2 hours)
+google-adk>=1.1.0
+google-cloud-aiplatform==1.38.0
+google-cloud-pubsub==2.18.4
+google-cloud-storage==2.10.0
+
+# AI Models (1 hour)
+anthropic==0.7.1
+
+# MCP (2 hours)
+mcp>=1.0.0
+
+# Database (1 hour)
+pymongo==4.6.0
+
+# Spatial Processing (3 hours)
+numpy==1.24.3
+open3d==0.17.0  # Point cloud processing
+pillow==10.1.0
+matplotlib==3.7.1  # Visualization
+plotly==5.17.0  # Interactive 3D plots
+"""
+
+# ============================================
+# shared/schemas.py - SIMPLE 3-AGENT SCHEMAS
+# ============================================
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Dict, Literal
+from datetime import datetime
+
+class Spatial3DInput(BaseModel):
+    """Input: 3D spatial dataset"""
+    dataset_id: str
+    dataset_name: str
+    dataset_type: Literal[
+        "point_cloud",
+        "depth_map", 
+        "lidar_scan",
+        "satellite_imagery",
+        "mesh_3d"
+    ]
+    file_url: str  # Cloud Storage URL
+    metadata: Dict = Field(default_factory=dict)
+    analysis_type: Literal[
+        "anomaly_detection",
+        "pattern_recognition",
+        "change_detection",
+        "density_analysis",
+        "feature_extraction"
+    ]
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+class AnalysisRequest(BaseModel):
+    """Request for spatial analysis"""
+    dataset_id: str
+    analysis_goal: str = Field(
+        ..., 
+        description="What user wants to learn from the data"
+    )
+    comparison_dataset_id: Optional[str] = None  # For change detection
+    output_format: Literal["report", "visualization", "both"] = "both"
+
+class PatternAnalysisOutput(BaseModel):
+    """Output from Pattern Analysis Agent"""
+    patterns_detected: List[Dict] = Field(default_factory=list)
+    anomalies: List[Dict] = Field(default_factory=list)
+    spatial_clusters: List[Dict] = Field(default_factory=list)
+    statistical_summary: Dict
+    key_findings: List[str]
+    confidence: float = Field(..., ge=0, le=1)
+    processing_time_seconds: float
+    mcp_tools_used: List[str] = Field(default_factory=list)
+
+class InsightExtractionOutput(BaseModel):
+    """Output from Insight Extraction Agent"""
+    key_insights: List[str]
+    contextual_analysis: str
+    correlations_found: List[Dict] = Field(default_factory=list)
+    hypotheses: List[str] = Field(default_factory=list)
+    recommendations: List[str]
+    confidence: float = Field(..., ge=0, le=1)
+    reasoning: str
+    mcp_tools_used: List[str] = Field(default_factory=list)
+
+class ReportGenerationOutput(BaseModel):
+    """Output from Report Generation Agent"""
+    report_title: str
+    executive_summary: str
+    detailed_analysis: str
+    visualizations: List[Dict] = Field(default_factory=list)
+    data_tables: List[Dict] = Field(default_factory=list)
+    conclusions: List[str]
+    next_steps: List[str]
+    report_url: Optional[str] = None  # Cloud Storage URL
+    mcp_tools_used: List[str] = Field(default_factory=list)
+
+
+# ============================================
+# mcp_servers/spatial_vision_mcp.py
+# ============================================
+from mcp.server import Server
+from mcp.types import Tool, TextContent
+import open3d as o3d
+import numpy as np
+from google.cloud import storage
+import json
+from typing import Dict, List
+import io
+
+class SpatialVisionMCP:
+    """
+    MCP Server for 3D spatial data processing
+    Provides tools for point cloud analysis, feature extraction
+    """
+    
+    def __init__(self):
+        self.server = Server("spatial-vision-analysis")
+        self.storage_client = storage.Client()
+        self._register_tools()
+    
+    def _register_tools(self):
+        """Register spatial analysis tools"""
+        
+        @self.server.list_tools()
+        async def list_tools() -> list[Tool]:
+            return [
+                Tool(
+                    name="process_point_cloud",
+                    description="Load and process 3D point cloud data",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "file_url": {"type": "string"},
+                            "downsample_factor": {"type": "number", "default": 1.0}
+                        },
+                        "required": ["file_url"]
+                    }
+                ),
+                Tool(
+                    name="detect_spatial_anomalies",
+                    description="Detect anomalies in spatial distribution",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "point_cloud_data": {"type": "object"},
+                            "sensitivity": {"type": "number", "default": 2.0}
+                        },
+                        "required": ["point_cloud_data"]
+                    }
+                ),
+                Tool(
+                    name="extract_3d_features",
+                    description="Extract geometric features from 3D data",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "point_cloud_data": {"type": "object"}
+                        },
+                        "required": ["point_cloud_data"]
+                    }
+                ),
+                Tool(
+                    name="compute_spatial_metrics",
+                    description="Compute density, clustering, distribution metrics",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "point_cloud_data": {"type": "object"},
+                            "metric_types": {"type": "array"}
+                        },
+                        "required": ["point_cloud_data"]
+                    }
+                ),
+                Tool(
+                    name="compare_point_clouds",
+                    description="Compare two point clouds for change detection",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "cloud1_url": {"type": "string"},
+                            "cloud2_url": {"type": "string"},
+                            "distance_threshold": {"type": "number", "default": 0.1}
+                        },
+                        "required": ["cloud1_url", "cloud2_url"]
+                    }
+                )
+            ]
+        
+        @self.server.call_tool()
+        async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+            """Execute spatial analysis tools"""
+            
+            if name == "process_point_cloud":
+                return await self._process_point_cloud(**arguments)
+            elif name == "detect_spatial_anomalies":
+                return await self._detect_spatial_anomalies(**arguments)
+            elif name == "extract_3d_features":
+                return await self._extract_3d_features(**arguments)
+            elif name == "compute_spatial_metrics":
+                return await self._compute_spatial_metrics(**arguments)
+            elif name == "compare_point_clouds":
+                return await self._compare_point_clouds(**arguments)
+            else:
+                return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    
+    async def _process_point_cloud(
+        self, 
+        file_url: str, 
+        downsample_factor: float = 1.0
+    ) -> list[TextContent]:
+        """Load and process point cloud"""
+        
+        # For demo: simulate processing
+        # In production: download from Cloud Storage and process with Open3D
+        
+        response = {
+            "file_url": file_url,
+            "processing_status": "success",
+            "point_count": 1250000,
+            "downsampled_count": int(1250000 * downsample_factor),
+            "bounds": {
+                "min": [-50.2, -30.5, 0.0],
+                "max": [120.8, 95.3, 45.2]
+            },
+            "center": [35.3, 32.4, 22.6],
+            "density": "high",
+            "data_quality": 0.95,
+            "processing_time_seconds": 2.3
+        }
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps(response, indent=2)
+        )]
+    
+    async def _detect_spatial_anomalies(
+        self, 
+        point_cloud_data: dict, 
+        sensitivity: float = 2.0
+    ) -> list[TextContent]:
+        """Detect spatial anomalies using statistical methods"""
+        
+        # Simulate anomaly detection
+        # In production: use DBSCAN, LOF, or statistical outlier detection
+        
+        response = {
+            "anomalies_detected": 23,
+            "anomaly_clusters": [
+                {
+                    "cluster_id": 1,
+                    "center": [45.2, 67.8, 12.3],
+                    "point_count": 8,
+                    "anomaly_score": 3.5,
+                    "type": "high_density_outlier",
+                    "description": "Unusual dense cluster in sparse region"
+                },
+                {
+                    "cluster_id": 2,
+                    "center": [89.1, 23.4, 34.5],
+                    "point_count": 15,
+                    "anomaly_score": 4.2,
+                    "type": "elevation_anomaly",
+                    "description": "Unexpected elevation spike"
+                }
+            ],
+            "sensitivity_used": sensitivity,
+            "confidence": 0.87,
+            "method": "statistical_outlier_detection"
+        }
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps(response, indent=2)
+        )]
+    
+    async def _extract_3d_features(self, point_cloud_data: dict) -> list[TextContent]:
+        """Extract geometric features"""
+        
+        response = {
+            "features_extracted": {
+                "planes": [
+                    {
+                        "plane_id": 1,
+                        "normal": [0.0, 0.0, 1.0],
+                        "area_sq_m": 450.2,
+                        "type": "ground_plane"
+                    },
+                    {
+                        "plane_id": 2,
+                        "normal": [0.0, 1.0, 0.0],
+                        "area_sq_m": 120.5,
+                        "type": "vertical_wall"
+                    }
+                ],
+                "edges": [
+                    {"edge_id": 1, "length_m": 45.2, "type": "building_boundary"},
+                    {"edge_id": 2, "length_m": 32.1, "type": "road_edge"}
+                ],
+                "surfaces": {
+                    "flat_surfaces": 5,
+                    "curved_surfaces": 2,
+                    "irregular_surfaces": 8
+                },
+                "volume_enclosed_cubic_m": 15234.5
+            },
+            "feature_count": 15,
+            "extraction_method": "RANSAC_plane_fitting",
+            "confidence": 0.92
+        }
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps(response, indent=2)
+        )]
+    
+    async def _compute_spatial_metrics(
+        self, 
+        point_cloud_data: dict, 
+        metric_types: list = None
+    ) -> list[TextContent]:
+        """Compute spatial metrics"""
+        
+        if metric_types is None:
+            metric_types = ["density", "clustering", "distribution"]
+        
+        response = {
+            "metrics": {
+                "density": {
+                    "overall_density": 2834.5,  # points per cubic meter
+                    "density_variance": 1250.3,
+                    "high_density_regions": 3,
+                    "low_density_regions": 2
+                },
+                "clustering": {
+                    "num_clusters": 7,
+                    "largest_cluster_size": 450000,
+                    "smallest_cluster_size": 12000,
+                    "cluster_separation": "well_separated"
+                },
+                "distribution": {
+                    "spatial_uniformity": 0.65,
+                    "skewness": [0.12, -0.05, 0.23],
+                    "kurtosis": 2.8,
+                    "distribution_type": "multimodal"
+                }
+            },
+            "computation_time_seconds": 1.2
+        }
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps(response, indent=2)
+        )]
+    
+    async def _compare_point_clouds(
+        self, 
+        cloud1_url: str, 
+        cloud2_url: str, 
+        distance_threshold: float = 0.1
+    ) -> list[TextContent]:
+        """Compare two point clouds for change detection"""
+        
+        response = {
+            "cloud1": cloud1_url,
+            "cloud2": cloud2_url,
+            "comparison_results": {
+                "points_added": 45230,
+                "points_removed": 12450,
+                "points_moved": 8920,
+                "unchanged_points": 1183400,
+                "change_percentage": 5.3
+            },
+            "significant_changes": [
+                {
+                    "change_id": 1,
+                    "location": [45.2, 67.3, 15.0],
+                    "change_type": "addition",
+                    "volume_cubic_m": 234.5,
+                    "description": "New structure detected"
+                },
+                {
+                    "change_id": 2,
+                    "location": [89.1, 23.4, 8.0],
+                    "change_type": "removal",
+                    "volume_cubic_m": 156.2,
+                    "description": "Material removed/excavated"
+                }
+            ],
+            "distance_threshold_used": distance_threshold,
+            "confidence": 0.91
+        }
+        
+        return [TextContent(
+            type="text",
+            text=json.dumps(response, indent=2)
+        )]
+
+
+# ============================================
+# agents/pattern_analysis_agent.py
+# ============================================
+from google.adk.agents import LlmAgent
+from shared.schemas import Spatial3DInput, PatternAnalysisOutput
+
+def create_pattern_analysis_agent(
+    spatial_mcp: SpatialVisionMCP,
+    mongodb_mcp
+) -> LlmAgent:
+    """
+    Agent 1: Pattern Analysis
+    Fast, quantitative analysis of spatial data
+    """
+    
+    agent = LlmAgent(
+        name="pattern_analysis_agent",
+        model="gemini-2.0-flash-exp",
+        
+        instruction="""You are a spatial data analyst specializing in pattern recognition.
+
+Your workflow:
+1. Process point cloud data (process_point_cloud)
+2. Detect spatial anomalies (detect_spatial_anomalies)
+3. Extract 3D geometric features (extract_3d_features)
+4. Compute spatial metrics (compute_spatial_metrics)
+5. Check historical patterns (query_spatial_patterns from MongoDB)
+
+Focus on:
+- Quantitative measurements (density, clustering, distribution)
+- Anomaly detection (outliers, unusual patterns)
+- Feature extraction (planes, edges, surfaces)
+- Statistical analysis (variance, uniformity, skewness)
+
+Be precise and data-driven. Provide numerical evidence.
+Track all MCP tools used in mcp_tools_used field.""",
+        
+        description="Analyzes spatial patterns and detects anomalies",
+        
+        input_schema=Spatial3DInput,
+        output_schema=PatternAnalysisOutput,
+        
+        tools=[spatial_mcp.server, mongodb_mcp.server]
+    )
+    
+    return agent
+
+
+# ============================================
+# agents/insight_extraction_agent.py
+# ============================================
+from shared.schemas import PatternAnalysisOutput, InsightExtractionOutput
+
+class InsightInput(BaseModel):
+    """Input for Insight Agent"""
+    dataset_info: Spatial3DInput
+    pattern_analysis: PatternAnalysisOutput
+    analysis_goal: str
+
+def create_insight_extraction_agent(mongodb_mcp) -> LlmAgent:
+    """
+    Agent 2: Insight Extraction
+    Deep contextual analysis and hypothesis generation
+    """
+    
+    agent = LlmAgent(
+        name="insight_extraction_agent",
+        model="claude-sonnet-4-20250514",
+        
+        instruction="""You are a spatial data scientist specializing in insight extraction.
+
+Your workflow:
+1. Review pattern analysis results
+2. Query historical data for context (get_historical_analysis from MongoDB)
+3. Compare with similar datasets (compare_datasets from MongoDB)
+4. Generate insights and hypotheses
+5. Provide actionable recommendations
+
+Focus on:
+- WHY patterns exist (root cause analysis)
+- WHAT patterns mean in context (domain knowledge)
+- HOW findings relate to user's goal
+- WHAT actions should be taken (recommendations)
+
+Examples of good insights:
+- "High-density cluster at [x,y] suggests new construction activity"
+- "Anomaly detected correlates with terrain elevation changes"
+- "Distribution pattern indicates natural vs. human-made features"
+
+Be thoughtful and context-aware. Connect dots between findings.
+Track all MCP queries in mcp_tools_used.""",
+        
+        description="Extracts insights and generates hypotheses from spatial patterns",
+        
+        input_schema=InsightInput,
+        output_schema=InsightExtractionOutput,
+        
+        tools=[mongodb_mcp.server]
+    )
+    
+    return agent
+
+
+# ============================================
+# agents/report_generation_agent.py
+# ============================================
+class ReportInput(BaseModel):
+    """Input for Report Agent"""
+    dataset_info: Spatial3DInput
+    pattern_analysis: PatternAnalysisOutput
+    insights: InsightExtractionOutput
+    analysis_goal: str
+
+def create_report_generation_agent(mongodb_mcp) -> LlmAgent:
+    """
+    Agent 3: Report Generation
+    Creates professional analysis reports with visualizations
+    """
+    
+    agent = LlmAgent(
+        name="report_generation_agent",
+        model="claude-sonnet-4-20250514",
+        
+        instruction="""You are a technical writer creating spatial analysis reports.
+
+Your workflow:
+1. Synthesize pattern analysis and insights
+2. Create executive summary (non-technical audience)
+3. Write detailed analysis (technical audience)
+4. Generate visualization specifications
+5. Provide conclusions and next steps
+6. Store report in MongoDB (store_report)
+
+Report structure:
+1. Executive Summary (3-5 sentences, key findings)
+2. Methodology (what was analyzed, how)
+3. Findings (patterns, anomalies, metrics)
+4. Analysis (insights, correlations, hypotheses)
+5. Visualizations (3D plots, heatmaps, charts)
+6. Conclusions (what it means)
+7. Recommendations (what to do next)
+
+Make reports:
+- Clear and actionable
+- Visually rich (specify charts/plots)
+- Both technical and accessible
+- Professional quality
+
+Track all MongoDB operations in mcp_tools_used.""",
+        
+        description="Generates comprehensive analysis reports",
+        
+        input_schema=ReportInput,
+        output_schema=ReportGenerationOutput,
+        
+        tools=[mongodb_mcp.server]
+    )
+    
+    return agent
+
+
+# ============================================
+# orchestrator.py - 3-AGENT WORKFLOW
+# ============================================
+from google.adk.agents import BaseAgent
+from google.adk.events import Event
+from typing import AsyncGenerator
+import json
+
+class SpatialAnalysisOrchestrator(BaseAgent):
+    """
+    Orchestrates 3-agent spatial analysis workflow
+    Simple sequential pipeline for solo hackathon
+    """
+    
+    pattern_agent: LlmAgent
+    insight_agent: LlmAgent
+    report_agent: LlmAgent
+    
+    model_config = {"arbitrary_types_allowed": True}
+    
+    def __init__(
+        self,
+        name: str,
+        pattern_agent: LlmAgent,
+        insight_agent: LlmAgent,
+        report_agent: LlmAgent
+    ):
+        super().__init__(
+            name=name,
+            pattern_agent=pattern_agent,
+            insight_agent=insight_agent,
+            report_agent=report_agent,
+            sub_agents=[pattern_agent, insight_agent, report_agent]
+        )
+    
+    async def _run_async_impl(self, ctx) -> AsyncGenerator[Event, None]:
+        """
+        Simple 3-step pipeline:
+        1. Pattern Analysis → 2. Insight Extraction → 3. Report Generation
+        """
+        
+        # Parse input
+        request_data = json.loads(ctx.user_content)
+        dataset_info = Spatial3DInput(**request_data["dataset"])
+        analysis_goal = request_data["analysis_goal"]
+        
+        yield Event(content=f"🔍 Starting spatial analysis for: {dataset_info.dataset_name}")
+        yield Event(content=f"📊 Analysis goal: {analysis_goal}")
+        
+        # STEP 1: Pattern Analysis
+        yield Event(content="\n🎯 STEP 1: Pattern Analysis Agent")
+        yield Event(content="  Processing 3D spatial data...")
+        
+        pattern_input = dataset_info.model_dump_json()
+        async for event in self.pattern_agent.run_async(ctx.with_user_content(pattern_input)):
+            yield event
+            if event.is_final_response:
+                pattern_result = PatternAnalysisOutput(**json.loads(event.content.parts[0].text))
+                
+                yield Event(content=f"\n✓ Pattern Analysis Complete:")
+                yield Event(content=f"  • Patterns detected: {len(pattern_result.patterns_detected)}")
+                yield Event(content=f"  • Anomalies found: {len(pattern_result.anomalies)}")
+                yield Event(content=f"  • Spatial clusters: {len(pattern_result.spatial_clusters)}")
+                yield Event(content=f"  • Confidence: {pattern_result.confidence:.2%}")
+                yield Event(content=f"  • Tools used: {', '.join(pattern_result.mcp_tools_used)}")
+        
+        # STEP 2: Insight Extraction
+        yield Event(content="\n💡 STEP 2: Insight Extraction Agent")
+        yield Event(content="  Analyzing patterns for deeper insights...")
+        
+        insight_input = InsightInput(
+            dataset_info=dataset_info,
+            pattern_analysis=pattern_result,
+            analysis_goal=analysis_goal
+        )
+        
+        async for event in self.insight_agent.run_async(ctx.with_user_content(insight_input.model_dump_json())):
+            yield event
+            if event.is_final_response:
+                insight_result = InsightExtractionOutput(**json.loads(event.content.parts[0].text))
+                
+                yield Event(content=f"\n✓ Insight Extraction Complete:")
+                yield Event(content=f"  • Key insights: {len(insight_result.key_insights)}")
+                yield Event(content=f"  • Correlations: {len(insight_result.correlations_found)}")
+                yield Event(content=f"  • Hypotheses: {len(insight_result.hypotheses)}")
+                yield Event(content=f"  • Recommendations: {len(insight_result.recommendations)}")
+                yield Event(content=f"  • Confidence: {insight_result.confidence:.2%}")
+        
+        # STEP 3: Report Generation
+        yield Event(content="\n📄 STEP 3: Report Generation Agent")
+        yield Event(content="  Creating comprehensive analysis report...")
+        
+        report_input = ReportInput(
+            dataset_info=dataset_info,
+            pattern_analysis=pattern_result,
+            insights=insight_result,
+            analysis_goal=analysis_goal
+        )
+        
+        async for event in self.report_agent.run_async(ctx.with_user_content(report_input.model_dump_json())):
+            yield event
+            if event.is_final_response:
+                report_result = ReportGenerationOutput(**json.loads(event.content.parts[0].text))
+                
+                yield Event(content=f"\n✓ Report Generation Complete:")
+                yield Event(content=f"  • Title: {report_result.report_title}")
+                yield Event(content=f"  • Visualizations: {len(report_result.visualizations)}")
+                yield Event(content=f"  • Conclusions: {len(report_result.conclusions)}")
+                yield Event(content=f"  • Report URL: {report_result.report_url}")
+        
+        yield Event(content="\n🎉 Analysis Complete!")
+        yield Event(content=f"\nFinal Report: {report_result.report_url}")
+
+
+# ============================================
+# SOLO HACKATHON DEMO SCENARIOS
+# ============================================
+"""
+DEMO SCENARIO 1: Urban Planning - Building Density Analysis
+Dataset: LiDAR scan of city block
+Goal: "Analyze building density and identify areas suitable for new development"
+
+Pattern Agent finds:
+- 15 building clusters
+- Average building height: 25m
+- 3 low-density zones identified
+- High density variance (σ=12.3m)
+
+Insight Agent determines:
+- Low-density zones near parks (intentional green space)
+- One low-density zone is underutilized commercial area
+- Building heights correlate with proximity to transit
+
+Report Agent generates:
+- 3D visualization of density heatmap
+- Recommendation: "Zone C suitable for 5-story mixed-use development"
+- Next steps: "Conduct traffic impact analysis"
+
+---
+
+DEMO SCENARIO 2: Construction Progress Tracking
+Dataset: Two point clouds (Week 1 vs Week 4)
+Goal: "Track construction progress and identify delays"
+
+Pattern Agent finds:
+- 45,230 points added (new structure)
+- 12,450 points removed (excavation)
+- 5.3% total change
+
+Insight Agent determines:
+- Foundation complete (matches planned schedule)
+- East wing behind schedule (only 60% of expected progress)
+- Material stockpile larger than expected (supply chain issue?)
+
+Report Agent generates:
+- Before/after 3D comparison
+- Progress timeline chart
+- Alert: "East wing construction 40% behind schedule"
+
+---
+
+DEMO SCENARIO 3: Environmental Monitoring - Deforestation Detection
+Dataset: Satellite-derived point cloud of forest region
+Goal: "Detect illegal deforestation activity"
+
+Pattern Agent finds:
+- 8 anomalous low-density regions
+- 2 regions show complete vegetation removal
+- Total affected area: 15.3 hectares
+
+Insight Agent determines:
+- Deforestation pattern suggests logging roads
+- Activity concentrated near protected boundary
+- Timeline matches dry season (easier access)
+
+Report Agent generates:
+- Heatmap of vegetation density changes
+- GPS coordinates of affected areas
+- Recommendation: "Alert forest service, priority investigation zones"
+
+---
+
+WINNING DEMO FLOW (5 minutes):
+
+1. Show dashboard with 3 datasets loaded
+2. Select Scenario 2 (Construction Progress) - most visual
+3. Upload two point clouds
+4. "Watch our 3-agent team analyze this in real-time..."
+5. Show agents working (live event stream)
+6. Display final report with 3D visualization
+7. "Now let me show you the power of MCP..."
+8. Show Pattern Agent's MongoDB queries
+9. Show how agents autonomously used spatial analysis tools
+10. "This entire workflow—from data upload to actionable insights—took 45 seconds"
+
+JUDGES: 🤯 "Solo developer built THIS?!"
+"""
+
+# ============================================
+# SOLO BUILD TIMELINE (30 HOURS)
+# ============================================
+"""
+Hours 0-4: Infrastructure Setup
+- GCP project, MongoDB Atlas, Cloud Storage
+- Basic FastAPI app
+- File upload endpoint
+- Test with sample point cloud
+
+Hours 4-8: MCP Servers
+- MongoDB MCP (use existing code, adapt)
+- Spatial Vision MCP (focus on simulation for demo)
+- Test tool calls manually
+
+Hours 8-14: 3 Agents
+- Pattern Analysis Agent (2 hours)
+- Insight Extraction Agent (2 hours)
+- Report Generation Agent (2 hours)
+- Test each individually
+
+Hours 14-20: Orchestrator & Integration
+- Build orchestrator (3 hours)
+- Wire up Pub/Sub (2 hours)
+- End-to-end testing (1 hour)
+
+Hours 20-26: Frontend (v0.dev!)
+- Generate dashboard with v0.dev (2 hours)
+- File upload UI (1 hour)
+- Live results display (1 hour)
+- 3D visualization (Plotly) (2 hours)
+
+Hours 26-30: Demo Polish
+- Create 3 demo datasets (realistic point clouds)
+- Write demo script
+- Practice presentation
+- Record backup video (in case live demo fails)
+
+CRITICAL SUCCESS FACTORS:
+✅ Use v0.dev for frontend (saves 6-8 hours)
+✅ Simulate spatial processing (don't actually process massive point clouds)
+✅ Pre-generate demo datasets with known patterns
+✅ Focus on agent orchestration (that's what judges care about)
+✅ Make it VISUAL (3D plots are impressive)
+"""
